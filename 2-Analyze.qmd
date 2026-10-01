@@ -1,0 +1,520 @@
+---
+title: "Analyzing the Data"
+subtitle: "Replication File II for the TEPS School Distinction Paper"
+author: "Takun Wang"
+date: today
+format: 
+  pdf:
+    sansfont: Georgia
+    number-sections: true
+    toc: true
+    toccolor: black
+    df-print: kable
+editor: visual
+---
+
+\newpage
+
+# Setup
+
+```{r Setup, message=FALSE, warning=FALSE}
+
+## Data packages
+library(tidyverse)
+library(haven)
+library(fastDummies)
+
+## Model packages
+library(fixest)
+library(nnet)
+library(mlogit)
+
+## Stat test packages
+library(sandwich)
+library(lmtest)
+
+## Display packages
+library(broom)
+library(modelsummary)
+library(kableExtra)
+```
+
+```{r Stamp}
+
+## file_stamp(): provenance stamp for input files
+file_stamp <- function(...) {
+  paths <- c(...)
+  fi <- file.info(paths)
+  data.frame(
+    file      = basename(paths),
+    size_mb   = round(fi$size / 1024^2, 1),
+    modified  = format(fi$mtime, "%Y-%m-%d"),
+    md5       = unname(tools::md5sum(paths)),
+    row.names = NULL
+  )
+}
+```
+
+```{r ClusterSE}
+
+## ms_cluster(): multinom estimates with cluster-robust SEs, packaged for modelsummary
+##   (modelsummary(vcov = ...) silently keeps the iid SEs for multinom models,
+##    because parameters::standard_error.multinom() ignores the vcov argument)
+ms_cluster <- function(model, cluster) {
+  V <- vcovCL(model, cluster = cluster)  # HC0 with G/(G-1) adjustment
+  b <- coef(model)                       # rows = response levels, cols = terms
+  tidy <- tibble(
+    term     = rep(colnames(b), times = nrow(b)),
+    response = rep(rownames(b), each = ncol(b)),
+    estimate = as.vector(t(b))
+  ) %>%
+    mutate(std.error = unname(sqrt(diag(V))[paste(response, term, sep = ":")]),
+           statistic = estimate / std.error,
+           p.value   = 2 * pnorm(-abs(statistic)),
+           conf.low  = estimate - qnorm(0.975) * std.error,
+           conf.high = estimate + qnorm(0.975) * std.error)
+  stopifnot(!anyNA(tidy$std.error))
+  glance <- get_gof(model)
+  glance$vcov.type <- paste("by:", paste(all.vars(cluster), collapse = " + "))
+  structure(list(tidy = tidy, glance = glance), class = "modelsummary_list")
+}
+```
+
+```{r Data}
+
+## Stamp data
+file_stamp("data/TEPS-Cleaned.dta")
+
+## Read data
+teps <- read_dta("data/TEPS-Cleaned.dta")
+  #glimpse(teps)
+
+
+## Factorize and rename variables
+teps$geoarea <- teps$geoarea %>% as.factor()
+levels(teps$geoarea) <- c("Taipei", "Taoyuan", "Taichung", "Tainan", "Kaohsiung", "Taitung")
+
+teps$schtype <- as.factor(teps$schtype)
+levels(teps$schtype) <- c("ordi", "priv", "star")
+
+teps$pses <- as.factor(teps$pses)
+levels(teps$pses) <- c("E0I0", "E0I1", "E1I0", "E1I1")
+teps$pses <- relevel(teps$pses, ref = "E0I1")
+
+teps$pedu <- as.factor(teps$pedu)
+teps$income <- as.factor(teps$income)
+teps <- teps %>% rename(pedu_bi = pedu2, income_bi = income2)
+
+teps$pethn <- as.factor(teps$pethn)
+teps$pocc <- as.factor(teps$pocc)
+```
+
+```{r SchoolType}
+
+## Check school type distribution
+teps %>% group_by(sch_id) %>% 
+  summarise(sch_id = first(sch_id), schtype = first(schtype), geoarea = first(geoarea)) %>% 
+  xtabs(~ schtype + geoarea, .) %>% 
+  kable()
+
+
+## Score Distribution
+teps %>% group_by(schtype) %>% summarise(
+  n = n(),
+  missing = sum(is.na(cogability)),
+  cog_avg = mean(cogability, na.rm = TRUE),
+  cog_std = sd(cogability, na.rm = TRUE),
+  cog_Q1 = quantile(cogability, probs = c(0.25), na.rm = TRUE),
+  cog_Q2 = median(cogability, na.rm = TRUE),
+  cog_Q3 = quantile(cogability, probs = c(0.75), na.rm = TRUE)) %>% 
+  mutate_if(is.numeric, round, digits=3) 
+
+teps %>% group_by(schtype) %>% summarise(
+  n = n(),
+  missing = sum(is.na(finscore)),
+  score_avg = mean(finscore, na.rm = TRUE),
+  score_std = sd(finscore, na.rm = TRUE),
+  score_Q1 = quantile(finscore, probs = c(0.25), na.rm = TRUE),
+  score_Q2 = median(finscore, na.rm = TRUE),
+  score_Q3 = quantile(finscore, probs = c(0.75), na.rm = TRUE)) %>% 
+  mutate_if(is.numeric, round, digits=1)
+
+
+## Visualization
+teps %>% ggplot(aes(x = cogability, color = schtype)) +
+  labs(x = "cogability") + geom_density()
+teps %>% ggplot(aes(x = finscore, color = schtype)) + 
+  labs(x = "finscore") + geom_density()
+
+#teps %>% filter(geoarea == "Taipei") %>% ggplot(aes(x = finscore, color = schtype)) + geom_density()
+#teps %>% filter(geoarea == "Taichung") %>% ggplot(aes(x = finscore, color = schtype)) + geom_density()
+
+teps %>% filter(schtype != "ordi") %>% 
+  ggplot(aes(x = finscore, color = schtype, fill = schtype, after_stat(density))) + 
+  labs(x = "finscore") + 
+  geom_histogram(position = "dodge", binwidth = 40, alpha = 0.6)
+```
+
+```{r Finalize}
+
+## Select variables
+teps <- teps %>% 
+  select(stud_id, sch_id, geoarea, priv, star, schtype,
+         male, onlychild, edstchild, ygstchild, cogability, marriage, pethn,
+         pedu, pedu_bi, income, income_bi, pses, pocc, pboss, pmgm,
+         pexpedu, book, art, reloc, 
+         acadcomm, talentcls, abstudy, edusav)
+
+
+## Drop NA
+teps <- teps %>% drop_na()  # n = 19053 -> 18465
+  #sapply(teps, function(y) sum(is.na(y))) %>% data.frame(na_count = .)
+
+
+## Variable Distributions
+teps %>% count(geoarea) %>% mutate(pct = round(n * 100 / sum(n), 2))
+teps %>% count(pedu) %>% mutate(pct = round(n * 100 / sum(n), 2))
+teps %>% count(income) %>% mutate(pct = round(n * 100 / sum(n), 2))
+teps %>% count(pses) %>% mutate(pct = round(n * 100 / sum(n), 2))
+```
+
+\newpage
+
+# Description
+
+```{r Summary}
+
+## Make dummies for factors
+teps2 <- teps %>% dummy_cols(select_columns = c("pethn", "pses", "pocc")) %>% 
+  select(-stud_id, -sch_id, -geoarea, -schtype, -pethn, -pedu, -income, -pses, -pocc)
+
+
+## Calculate means
+vars <- teps2 %>% colnames()
+sum1 <- teps2 %>% summarise_all(mean)
+sum2 <- teps2 %>% group_by(priv, star) %>% summarise_all(mean)
+
+
+## Create a data frame
+sumstat <- data.frame(
+  Variable = vars,
+  Mean_All = as.numeric(sum1),
+  Ordinary = as.numeric(sum2[1,]),
+  Private = as.numeric(sum2[3,]),
+  Star = as.numeric(sum2[2,]))
+
+
+# Output
+sumstat <- sumstat %>% mutate_if(is.numeric, round, digits=3)
+sumstat
+# write_csv(sumstat, "export/summary_statistics.csv")
+```
+
+\newpage
+
+# Private Schools
+
+```{r Private}
+
+## M1: Independent
+Priv1 <- feglm(
+  priv ~ pedu_bi + income_bi,
+  family = "binomial",
+  data = teps,
+  cluster = ~sch_id
+)
+
+
+## M2: Independent + Control
+Priv2 <- feglm(
+  priv ~ pedu_bi + income_bi + 
+    male + onlychild + edstchild + ygstchild + cogability + marriage + 
+    pethn + geoarea + pocc + pboss + pmgm,
+  family = "binomial",
+  data = teps,
+  cluster = ~sch_id
+)
+
+
+## M3: Interaction
+teps$peduXincome <- teps$pedu_bi*teps$income_bi
+
+Priv3 <- feglm(
+  priv ~ pedu_bi + income_bi + peduXincome + 
+    male + onlychild + edstchild + ygstchild + cogability + marriage + 
+    pethn + geoarea + pocc + pboss + pmgm,
+  family = "binomial",
+  data = teps,
+  cluster = ~sch_id
+)
+
+
+## M4: Categorization
+Priv4 <- feglm(
+  priv ~ pses + 
+    male + onlychild + edstchild + ygstchild + cogability + marriage + 
+    pethn + geoarea + pocc + pboss + pmgm,
+  family = "binomial",
+  data = teps,
+  cluster = ~sch_id
+)
+
+
+## Show results
+modelsummary(list(Priv1, Priv2, Priv3, Priv4),
+             coef_map = c(
+               "pedu_bi", "income_bi", "peduXincome",
+               "psesE0I0", "psesE1I0", "psesE1I1",
+               "male", "onlychild", "edstchild", "ygstchild", "cogability",
+               "marriage", "pboss", "pmgm", 
+               "(Intercept)"), 
+             gof_omit = "R2|BIC|RMSE", 
+             title = "Private vs. Public",
+             stars = TRUE, 
+             output = "markdown")
+
+# modelsummary(list(Priv1, Priv2, Priv3, Priv4), 
+#              stars = TRUE, output = "export/private.xlsx")
+```
+
+\newpage
+
+# Star Schools
+
+```{r Star}
+
+## Multinom
+Star1 <- teps %>%
+  multinom(schtype ~ pedu_bi + income_bi + peduXincome +
+             male + onlychild + edstchild + ygstchild + cogability + marriage +
+             pethn + geoarea + pocc + pboss + pmgm,
+        data = .)
+Star1_cl <- ms_cluster(Star1, cluster = ~ sch_id)
+
+
+## Multinom with a different reference group
+teps$schtype <- relevel(teps$schtype, ref = "priv")
+Star2 <- teps %>%
+  multinom(schtype ~ pedu_bi + income_bi + peduXincome +
+             male + onlychild + edstchild + ygstchild + cogability + marriage +
+             pethn + geoarea + pocc + pboss + pmgm,
+        data = .)
+Star2_cl <- ms_cluster(Star2, cluster = ~ sch_id)
+
+
+## Results (SEs clustered by school)
+modelsummary(list(Star1_cl, Star2_cl),
+             shape = term ~ model + response,
+             coef_map = c(
+               "pedu_bi", "income_bi", "peduXincome",
+               "male", "onlychild", "edstchild", "ygstchild", "cogability",
+               "marriage", "pboss", "pmgm", 
+               "(Intercept)"), 
+             gof_omit = "R2|BIC|RMSE",
+             title = "Private & Star vs. Public",
+             stars = TRUE, 
+             output = "markdown")
+
+# modelsummary(list(Star1_cl, Star2_cl),
+#              shape = term ~ model + response, 
+#              stars = TRUE, output = "export/star.xlsx")
+```
+
+## Check
+
+```{r StarCheck}
+
+## Cross-check: mlogit + vcovCL reproduces the clustered SEs in Star1_cl
+teps_choice <- mlogit.data(
+  teps,
+  choice = "schtype",
+  shape = "wide",
+  chid.var = "stud_id")
+
+# mlogit syntax:
+# choice ~ alternative_specific_variables | individual_specific_variables
+Star1_ml <- mlogit(
+  schtype ~ 0 |
+    pedu_bi + income_bi + peduXincome +
+    male + onlychild + edstchild + ygstchild + cogability + marriage +
+    pethn + geoarea + pocc + pboss + pmgm,
+  data = teps_choice, reflevel = "ordi"
+)
+
+## teps_choice keeps teps' row order, so teps$sch_id lines up with its choice situations
+ct <- coeftest(Star1_ml, vcov. = vcovCL(Star1_ml, cluster = teps$sch_id))
+
+Star1_cl$tidy %>%
+  filter(term %in% c("pedu_bi", "income_bi", "peduXincome")) %>%
+  mutate(se_mlogit = ct[paste(term, response, sep = ":"), "Std. Error"]) %>%
+  select(response, term, estimate, std.error, se_mlogit)
+```
+
+## Sequence
+
+```{r Sequence}
+
+## Tidy coefficient tests
+coeftest_tidy = function(tested) {
+  tested %>% 
+    tidy() %>% 
+    filter(str_starts(term, "pses")) %>%
+    mutate(
+      p.sig = case_when(
+        p.value < .001 ~ "***",
+        p.value < .01  ~ "**",
+        p.value < .05  ~ "*",
+        p.value < .1   ~ ".",
+        .default = ""
+      ),
+      estimate = round(estimate, 3),
+      std.error = round(std.error, 3),
+      statistic = round(statistic, 2)
+    )
+}
+
+## A. Private vs. Public (SES Cat)
+teps$pses <- relevel(teps$pses, ref = "E0I0")
+PrivSES <- feglm(
+  priv ~ pses + 
+    male + onlychild + edstchild + ygstchild + cogability + marriage + 
+    pethn + geoarea + pocc + pboss + pmgm,
+  family = "binomial", 
+  data = teps,
+  cluster = ~sch_id
+) 
+PrivSES %>% coeftest() %>% coeftest_tidy()
+
+
+## B. Multinom (SES Cat)
+teps$schtype <- relevel(teps$schtype, ref = "ordi")
+teps_choice <- mlogit.data(
+  teps,
+  choice = "schtype",
+  shape = "wide",
+  chid.var = "stud_id")
+
+StarSES <- mlogit(
+  schtype ~ 0 |
+    pses +
+    male + onlychild + edstchild + ygstchild + cogability + marriage +
+    pethn + geoarea + pocc + pboss + pmgm,
+  data = teps_choice, reflevel = "ordi"
+)
+
+StarSES %>% 
+  coeftest(vcov. = vcovCL(StarSES, cluster = teps$sch_id)) %>%
+  coeftest_tidy() %>% 
+  arrange(str_detect(term, ":star"), term)
+
+
+## C. Sequence 1 (Priv & Star vs. Ordi) (SES Cat)
+teps <- teps %>% mutate(privstar = ifelse(schtype == "ordi", 0, 1))
+Seq1SES <- feglm(
+  privstar ~ pses + 
+    male + onlychild + edstchild + ygstchild + cogability + marriage + 
+    pethn + geoarea + pocc + pboss + pmgm,
+  family = "binomial", 
+  data = teps,
+  cluster = ~sch_id
+) 
+Seq1SES %>% coeftest() %>% coeftest_tidy()
+
+
+## C. Sequence 2 (Star vs. Priv; Ordi excluded) (SES Cat)
+Seq2SES <- feglm(
+  star ~ pses + 
+    male + onlychild + edstchild + ygstchild + cogability + marriage + 
+    pethn + geoarea + pocc + pboss + pmgm,
+  family = "binomial", 
+  data = teps %>% filter(schtype != "ordi"),
+  cluster = ~sch_id
+) 
+Seq2SES %>% coeftest() %>% coeftest_tidy()
+```
+
+# Parenting
+
+```{r Parenting}
+
+# Define dependent variables for the models (mediators)
+dep_vars <- c("pexpedu", "book", "art", "reloc",
+              "acadcomm", "talentcls", "abstudy", "edusav")
+
+
+# Loop through each dependent variable and save models separately
+for (i in seq_along(dep_vars)) {
+  formula <- as.formula(paste(dep_vars[i], "~ pedu_bi + income_bi + peduXincome + 
+                               male + onlychild + edstchild + ygstchild + 
+                               marriage + pethn + geoarea + 
+                               pocc + pboss + pmgm"))
+  model <- feglm(formula, family = "binomial", cluster = ~sch_id, data = teps)
+  assign(paste0("Prt", i), model)
+}
+
+## Results
+modelsummary(
+  list("pexpedu" = Prt1, "book" = Prt2, "art" = Prt3, "reloc" = Prt4),
+  coef_map = c("pedu_bi", "income_bi", "peduXincome"), 
+  gof_omit = "R2|BIC|RMSE", 
+  title = "Intensive Parenting",
+  stars = TRUE,
+  output = "markdown"
+)
+
+modelsummary(
+  list("acadcomm" = Prt5, "talentcls" = Prt6, "abstudy" = Prt7, "edusav" = Prt8),
+  coef_map = c("pedu_bi", "income_bi", "peduXincome"), 
+  gof_omit = "R2|BIC|RMSE", 
+  title = "Concerted Outsourcing",
+  stars = TRUE,
+  output = "markdown"
+)
+```
+
+```{r Mechanism}
+
+## Multinom
+teps$schtype <- relevel(teps$schtype, ref = "ordi")
+Mech1 <- teps %>% 
+  multinom(schtype ~ pedu_bi + income_bi + peduXincome + 
+             pexpedu + book + art + reloc + 
+             acadcomm + talentcls + abstudy + edusav + 
+             male + onlychild + edstchild + ygstchild + cogability + marriage + 
+             pethn + geoarea + pocc + pboss + pmgm,
+        data = .) 
+Mech1_cl <- ms_cluster(Mech1, cluster = ~ sch_id)
+
+
+## Multinom with a different reference group
+teps$schtype <- relevel(teps$schtype, ref = "priv")
+Mech2 <- teps %>% 
+  multinom(schtype ~ pedu_bi + income_bi + peduXincome + 
+             pexpedu + book + art + reloc + 
+             acadcomm + talentcls + abstudy + edusav + 
+             male + onlychild + edstchild + ygstchild + cogability + marriage + 
+             pethn + geoarea + pocc + pboss + pmgm,
+        data = .) 
+Mech2_cl <- ms_cluster(Mech2, cluster = ~ sch_id)
+
+## Results (SEs clustered by school)
+modelsummary(list(Mech1_cl, Mech2_cl),
+             shape = term ~ model + response,
+             coef_map = c(
+               "pedu_bi", "income_bi", "peduXincome",
+               "pexpedu", "book", "art", "reloc",
+               "acadcomm", "talentcls", "abstudy", "edusav",
+               "(Intercept)"), 
+             gof_omit = "R2|BIC|RMSE",
+             title = "Parenting and School Type",
+             stars = TRUE, 
+             output = "markdown")
+```
+
+------------------------------------------------------------------------
+
+*End of replication document*
+
+```{r Session}
+sessionInfo()
+```

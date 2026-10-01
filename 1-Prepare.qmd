@@ -1,0 +1,441 @@
+---
+title: "Preparing the Analytic Sample"
+subtitle: "Replication File I for the TEPS School Distinction Paper"
+author: "Takun Wang"
+date: today
+format: 
+  pdf:
+    sansfont: Georgia
+    number-sections: true
+    toc: true
+    toccolor: black
+editor: visual
+---
+
+\newpage
+
+# Setup
+
+```{r Libraries, message=FALSE}
+
+## Load packages
+library(tidyverse)
+library(haven)
+```
+
+```{r Root}
+
+## Store root (override with an environment variable if the store moves)
+raw_root <- Sys.getenv("RAWDATA_ROOT", path.expand("~/Analyses/RawData"))
+
+## file_stamp(): provenance stamp for input files
+file_stamp <- function(...) {
+  paths <- c(...)
+  fi <- file.info(paths)
+  data.frame(
+    file      = basename(paths),
+    size_mb   = round(fi$size / 1024^2, 1),
+    modified  = format(fi$mtime, "%Y-%m-%d"),
+    md5       = unname(tools::md5sum(paths)),
+    row.names = NULL
+  )
+}
+
+## pin_dta_timestamp(): fix the save time in a .dta header so its md5 depends only on the data
+pin_dta_timestamp <- function(path, timestamp = "01 Jan 2000 00:00") {
+  bytes <- readBin(path, "raw", file.size(path))
+  pos <- grepRaw("<timestamp>\021", bytes[1:200], fixed = TRUE)  # tag + length byte (17)
+  stopifnot(length(pos) == 1, nchar(timestamp) == 17)
+  bytes[(pos + 12):(pos + 28)] <- charToRaw(timestamp)
+  writeBin(bytes, path)
+}
+```
+
+# Student Survey Data
+
+```{r Student}
+
+## Stamp student data
+path_stu <- file.path(raw_root, "TEPS", "w1_j_s_lv7.0.dta")
+file_stamp(path_stu)
+
+## Read student data
+w1s <- read_dta(path_stu)  # wave 1 (2001), n = 20055
+  #sapply(w1s, function(y) sum(is.na(y))) %>% data.frame(na_count = .) %>% filter(na_count != 0)
+
+
+## Gender (male=1)
+w1s$male <- case_match(w1s$w1s502, 1 ~ 1, 2 ~ 0, 99 ~ NA)
+  #w1s %>% count(male)
+
+
+## Siblings
+for (i in 1:4) {
+  w1s[[c('edbro', 'ygbro', 'edsis', 'ygsis')[i]]] <- case_match(
+    w1s[[c('w1s203', 'w1s204', 'w1s205', 'w1s206')[i]]],
+    1 ~ 0, c(2, 3, 4, 5) ~ 1, c(97, 99) ~ -5)}
+  #w1s %>% count(edbro)
+
+w1s$sib <- w1s$edbro + w1s$ygbro + w1s$edsis + w1s$ygsis  # all NA = -20
+w1s$onlychild <- case_match(w1s$sib, 0 ~ 1, -20 ~ NA, .default = 0)
+  #w1s %>% count(onlychild)
+
+w1s$edsib <- w1s$edbro + w1s$edsis - w1s$onlychild  # those with no elder siblings and not the only child
+w1s$edstchild <- case_match(w1s$edsib, 0 ~ 1, NA ~ NA, .default = 0)
+  #w1s %>% count(edstchild)
+
+w1s$ygsib <- w1s$ygbro + w1s$ygsis - w1s$onlychild  # those with no younger siblings and not the only child
+w1s$ygstchild <- case_match(w1s$ygsib, 0 ~ 1, NA ~ NA, .default = 0)
+  #w1s %>% select(edbro, edsis, ygbro, ygsis, onlychild, edstchild, ygstchild)
+
+
+## Cognitive Ability
+w1s$cogability <- w1s$w1all3p
+
+
+## Geographical Area
+w1s <- w1s %>% mutate(geoarea = case_match(w1admarea,
+  c(11,31,21) ~ 1,  # BBG
+  c(33,22,34,35) ~ 2,  # TZZM
+  c(23,36,37,38) ~ 3,  # ZZZT
+  c(39,24,40,25,41) ~ 4,  # YJJNN
+  c(12,42,43) ~ 5,  # GGP
+  c(32,45,44,46) ~ 6))  # YHDP
+
+
+## Select variables
+w1s <- w1s %>% select(
+  stud_id, w1sch_id, w1priv, w1urban3, w1scarea, w1admarea, geoarea,  # student & school info.
+  male, onlychild, edstchild, ygstchild, cogability)  # student background & outcome
+
+```
+
+# Parent Survey Data
+
+```{r Parent}
+
+## Stamp parent data
+path_prt <- file.path(raw_root, "TEPS", "w1_j_p_lv7.0.dta")
+file_stamp(path_prt)
+
+## Read family data
+w1p <- read_dta(path_prt)  # n = 19779
+
+## Filter data
+w1p <- w1p %>% filter(w1p101 == 1)  # responded by one of the parents, n = 19053
+  #w1p %>% count(w1p101)
+
+```
+
+```{r Background}
+
+## Marriage
+w1p$marriage <- case_match(w1p$w1p103, c(1,2) ~ 1, c(97,99) ~ NA, .default = 0)
+  #w1p %>% count(marriage)
+
+
+## Ethnicity (1TW, 2MainLand, 3Indi&Other)
+w1p$faethn <- case_match(w1p$w1faethn, c(1,2) ~ 1, 3 ~ 2, c(4,5) ~ 3, c(97,99) ~ 9)
+w1p$moethn <- case_match(w1p$w1moethn, c(1,2) ~ 1, 3 ~ 2, c(4,5) ~ 3, c(97,99) ~ 9)
+  #xtabs(~faethn + moethn, w1p) %>% addmargins(FUN = sum)
+
+w1p <- w1p %>%  
+	mutate(pethn = case_when(
+	  faethn == 1 & moethn == 1 ~ 1,  # both TW
+	  faethn == 1 & moethn >= 3 ~ 2,  # 1 TW + 1 Non-Main
+	  faethn >= 3 & moethn == 1 ~ 2,
+	  faethn == 2 & moethn == 2 ~ 3,  # both MainLand
+	  faethn == 2 | moethn == 2 ~ 4,  # 1 MainLand
+		faethn == 3 & moethn == 3 ~ 5,  # Other (both Indi/Other)
+		.default = NA))
+  #w1p %>% count(pethn)
+
+w1p <- w1p %>% mutate(faethn = case_match(faethn, 9 ~ NA, .default = faethn)) %>% 
+  mutate(moethn = case_match(moethn, 9 ~ NA, .default = moethn))
+
+
+## Education
+w1p$faedu <- case_match(w1p$w1faedu, c(6,97,99) ~ 0, .default = w1p$w1faedu)
+w1p$moedu <- case_match(w1p$w1moedu, c(6,97,99) ~ 0, .default = w1p$w1moedu)
+  #xtabs(~ faedu + moedu, w1p) %>% addmargins(FUN = sum)
+
+w1p <- w1p %>% 
+  mutate(pedu = case_when(
+    faedu >= moedu ~ faedu,
+    faedu <  moedu ~ moedu)) %>% 
+  mutate(pedu = case_match(pedu, 0 ~ NA, .default = pedu))
+  #w1p %>% count(pedu)
+
+w1p$pedu2 <- case_match(w1p$pedu, c(1,2,3) ~ 0, c(4,5) ~ 1, NA ~ NA)
+  #w1p %>% count(pedu2)
+
+w1p <- w1p %>% mutate(faedu = case_match(faedu, 0 ~ NA, .default = faedu)) %>% 
+  mutate(moedu = case_match(moedu, 0 ~ NA, .default = moedu))
+
+
+## Income (<2, 2-5, 5-10, 10-15, >15)
+w1p$income <- case_match(w1p$w1p515, 6 ~ 5, c(97,99) ~ NA, .default = w1p$w1p515)
+  #w1p %>% count(income)
+
+w1p$income2 <- case_match(w1p$income, c(1,2,3) ~ 0, c(4,5) ~ 1, NA ~ NA)
+  #w1p %>% count(income2)
+
+
+## Parent SES (Education x Income)
+w1p$pses <- case_when(
+  w1p$pedu2 == 0 & w1p$income2 == 0 ~ 1,
+  w1p$pedu2 == 0 & w1p$income2 == 1 ~ 2,
+  w1p$pedu2 == 1 & w1p$income2 == 0 ~ 3,
+  w1p$pedu2 == 1 & w1p$income2 == 1 ~ 4)
+
+
+## Occupation (1Labor, 2Service, 3Public, 4Expert, 5Other)
+w1p$faocc <- case_match(w1p$w1faocc, 7 ~ 1, 6 ~ 2, c(1,2) ~ 3, c(3,4,5) ~ 4, c(8,9) ~ 0, c(97,99) ~ -1) 
+w1p$moocc <- case_match(w1p$w1moocc, 7 ~ 1, 6 ~ 2, c(1,2) ~ 3, c(3,4,5) ~ 4, c(8,9) ~ 0, c(97,99) ~ -1)
+  #xtabs(~ faocc + moocc, w1p) %>% addmargins(FUN = sum)
+
+w1p <- w1p %>% 
+  mutate(pocc = case_when(
+    faocc == 4 | moocc == 4 ~ 4,  # 4: Exp
+    faocc == 3 | moocc == 3 ~ 3,
+    faocc == 2 | moocc == 2 ~ 2,
+    faocc == 1 | moocc == 1 ~ 1,
+    faocc == 0 | moocc == 0 ~ 5,  # 5: Other
+    faocc == -1 & moocc == -1 ~ NA))
+  #w1p %>% count(pocc)
+
+w1p <- w1p %>% mutate(faocc = case_when(
+  faocc == -1 & moocc != -1 ~ 5,
+  faocc == -1 & moocc == -1 ~ NA,
+  faocc == 0 ~ 5,
+  .default = faocc))
+w1p <- w1p %>% mutate(moocc = case_when(
+  moocc == -1 & faocc <=5 ~ 5,
+  moocc == -1 & is.na(faocc) ~ NA,
+  moocc == 0 ~ 5,
+  .default = moocc))
+
+
+## Employer
+w1p$faboss <- case_match(w1p$w1faself, c(3,4) ~ 1, c(97,99) ~ 9, .default = 0)
+w1p$moboss <- case_match(w1p$w1moself, c(3,4) ~ 1, c(97,99) ~ 9, .default = 0)
+  #xtabs(~faboss + moboss, w1p)
+
+w1p <- w1p %>% 
+  mutate(pboss = case_when(
+    faboss == 1 | moboss == 1 ~ 1,
+    faboss == 9 & moboss == 9 ~ NA,
+    .default = 0))
+  #w1p %>% count(pboss)
+
+
+## Management (excluding self-employers)
+w1p$famgm <- case_match(w1p$w1famgm, c(1,2) ~ 1, c(97,99) ~ 9, .default = 0)
+w1p$momgm <- case_match(w1p$w1momgm, c(1,2) ~ 1, c(97,99) ~ 9, .default = 0)
+  #xtabs(~ w1faself + famgm, w1p)
+
+w1p <- w1p %>% 
+  mutate(famgm = case_when(
+    w1faself == 2 | w1faself == 3 | w1faself == 4 | w1faself == 6 ~ 0,
+    .default = famgm)) %>% 
+  mutate(momgm = case_when(
+    w1moself == 2 | w1moself == 3 | w1moself == 4 | w1moself == 6 ~ 0,
+    .default = momgm))
+  #xtabs(~ w1faself + famgm, w1p)
+  #xtabs(~ famgm + momgm, w1p)
+    
+w1p <- w1p %>% 
+  mutate(pmgm = case_when(
+    famgm == 1 | momgm == 1 ~ 1,
+    famgm == 9 & momgm == 9 ~ NA,
+    .default = 0))
+  #w1p %>% count(pmgm)
+
+w1p <- w1p %>% mutate(faboss = case_match(faboss, 9 ~ NA, .default = faboss)) %>% 
+  mutate(moboss = case_match(moboss, 9 ~ NA, .default = moboss)) %>% 
+  mutate(famgm = case_match(famgm, 9 ~ NA, .default = famgm)) %>% 
+  mutate(momgm = case_match(momgm, 9 ~ NA, .default = momgm))
+
+```
+
+```{r Parenting}
+
+## Educational Expectation (above college)
+w1p$pexpedu <- case_match(w1p$w1p510a, c(4,5) ~ 1, c(97,99) ~ NA, .default = 0)
+  #w1p %>% count(pexpedu)
+
+
+## Book Exhibition
+w1p$book <- case_match(w1p$w1p301, c(3,4) ~ 1, c(97,99) ~ NA, .default = 0)
+  #w1p %>% count(bookexpo)
+
+
+## Art Performance
+w1p$art <- case_match(w1p$w1p302, c(3,4) ~ 1, c(97,99) ~ NA, .default = 0)
+  #w1p %>% count(bookexpo)
+
+
+## Volunteer
+w1p$volunt <- case_match(w1p$w1p303, c(3,4) ~ 1, c(97,99) ~ NA, .default = 0)
+  #w1p %>% count(volunt)
+
+
+## Relocation (actual or on paper)
+w1p$reloc <- case_match(w1p$w1p501, 2 ~ 1, c(97,99) ~ NA, .default = 0)
+  #w1p %>% count(reloc)
+
+
+## Academic Communication
+w1p$acadcomm <- case_match(w1p$w1p310, c(3,4) ~ 1, c(97,99) ~ NA, .default = 0)
+  #w1p %>% count(acadcomm)
+
+
+## Talent Class
+w1p$talentcls <- case_match(w1p$w1p304, 2 ~ 1, c(97,99) ~ NA, .default = 0)
+
+w1p <- w1p %>% mutate(ntalentcls = 
+  w1p3052 + w1p3053 + w1p3054 + w1p3055 + w1p3056) %>% 
+  mutate(ntalentcls = case_match(ntalentcls, 495 ~ 0, .default = ntalentcls))
+  #w1p %>% count(ntalentcls)
+
+
+## Travel
+w1p$travel <- case_match(w1p$w1p504, c(2,3) ~ 1, c(97,99) ~ NA, .default = 0)
+
+
+## Abroad Study
+w1p$abstudy <- case_match(w1p$w1p503, 2 ~ 1, c(97,99) ~ NA, .default = 0)
+
+
+## Saving for Educaion
+w1p$edusav <- case_match(w1p$w1p507, 2 ~ 1, c(97,99) ~ NA, .default = 0)
+  #w1p %>% count(edusav)
+
+```
+
+```{r SPMerge}
+
+## Select variables
+w1p <- w1p %>% select(stud_id, 
+  marriage, faethn, moethn, pethn,  # basic info.
+  faedu, moedu, pedu, pedu2, income, income2, pses,  # SES
+  faocc, moocc, pocc, faboss, moboss, pboss, famgm, momgm, pmgm,  # occupation
+  pexpedu,  # parenting
+  book, art, volunt, reloc,  # parenting-accompany
+  acadcomm, talentcls, ntalentcls, travel, abstudy, edusav)   # parenting-outsource
+
+
+## Merge data
+teps <- inner_join(w1s, w1p, by = "stud_id")  # n = 20055/19053 -> 19053
+
+```
+
+# School Data
+
+```{r School}
+
+## Stamp score data
+path_scr <- file.path(raw_root, "TEPS", "w1j_score.dta")
+file_stamp(path_scr)
+
+## Attach school id to score data
+score <- read_dta(path_scr) %>%   # n = 18929
+  select(stud_id, score_fin) %>% drop_na()         # n = 18032
+
+score <- w1s %>% select(stud_id, w1sch_id, w1priv, w1urban3, w1admarea, geoarea) %>% 
+  right_join(score, by = "stud_id")  # merge with w1s to get school id
+
+
+## Create a list of schools with their mean scores
+schscore <- score %>% group_by(w1sch_id) %>%  # create school list
+  summarise(n = n(), meanscore = mean(score_fin), priv = first(w1priv),
+            urban = first(w1urban3), admarea = first(w1admarea), geoarea = first(geoarea)) %>%
+  arrange(desc(meanscore)) %>%  # sort by final score
+  filter(n >= 10)  # n = 332 -> 331
+
+
+## Public and Private Schools by geoarea
+  teps %>% group_by(w1sch_id) %>% 
+    summarise(priv = first(w1priv), admarea = first(w1admarea), geoarea = first(geoarea)) %>% 
+    xtabs(~ priv + geoarea, .)
+
+
+## Define Star Schools (top 54/279=19.35% of public schools)
+schscore <- schscore %>% filter(priv == 0) %>% 
+  group_by(geoarea) %>% 
+  mutate(rank_bygeo = rank(-meanscore)) %>%   # rank school by sector
+  mutate(star = case_when(
+    geoarea == 1 & rank_bygeo <= round(97*0.1935) ~ 1,
+    geoarea == 2 & rank_bygeo <= round(30*0.1935) ~ 1,
+    geoarea == 3 & rank_bygeo <= round(65*0.1935) ~ 1,
+    geoarea == 4 & rank_bygeo <= round(29*0.1935) ~ 1,
+    geoarea == 5 & rank_bygeo <= round(36*0.1935) ~ 1,
+    geoarea == 6 & rank_bygeo <= round(22*0.1935) ~ 1,
+    .default = 0)) %>%
+  ungroup() %>% 
+  right_join(schscore)
+schscore %>% xtabs(~ star + geoarea, .)
+schscore$star <- schscore$star %>% replace_na(0)
+
+
+## Merge data
+teps <- schscore %>% select(w1sch_id, meanscore, star) %>% 
+  right_join(teps, by = "w1sch_id") %>%   # n = 19053 -> 19053
+  left_join(score) %>%  # merge final scores
+  arrange(stud_id)
+  #teps %>% filter(is.na(star)) %>% distinct(w1sch_id)  # two schools with final scores missing
+
+teps$star <- teps$star %>% replace_na(0)
+  #teps %>% filter(star == 1) %>% distinct(w1sch_id)
+
+
+## Create Schooltype
+teps$schtype <- case_when(
+  teps$w1priv == 1 & teps$star == 0 ~ 2,
+  teps$w1priv == 0 & teps$star == 1 ~ 3,
+  .default = 1)
+  #teps %>% count(schtype)
+
+```
+
+# Write
+
+```{r Finalize}
+
+## Check missing data
+#sapply(teps, function(y) sum(is.na(y))) %>% data.frame(na_count = .)
+
+
+## Rename and order columns
+teps <- teps %>% rename(
+  sch_id = w1sch_id, 
+  priv = w1priv,
+  urban = w1urban3, 
+  scarea = w1scarea,
+  admarea = w1admarea,
+  finscore = score_fin)
+
+teps <- teps %>% select(stud_id, 
+  sch_id, urban, scarea, admarea, geoarea, meanscore, priv, star, schtype,  # school
+  male, cogability, finscore, # student
+  onlychild, edstchild, ygstchild, marriage, faethn, moethn, pethn,  # family
+  faedu, moedu, pedu, pedu2, income, income2, pses,  # parental SES
+  faocc, moocc, pocc, faboss, moboss, pboss, famgm, momgm, pmgm,  # parental occupation
+  pexpedu,  # parenting
+  book, art, volunt, reloc,  # parenting-accompany
+  acadcomm, talentcls, ntalentcls, travel, abstudy, edusav)  # parenting-outsource
+
+
+## Export data
+write_dta(teps, "data/TEPS-Cleaned.dta")
+pin_dta_timestamp("data/TEPS-Cleaned.dta")
+file_stamp("data/TEPS-Cleaned.dta")
+```
+
+------------------------------------------------------------------------
+
+*End of replication document*
+
+```{r Session}
+sessionInfo()
+```

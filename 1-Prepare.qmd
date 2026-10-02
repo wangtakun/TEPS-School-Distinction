@@ -125,6 +125,13 @@ w1p <- read_dta(path_prt)  # n = 19779
 w1p <- w1p %>% filter(w1p101 == 1)  # responded by one of the parents, n = 19053
   #w1p %>% count(w1p101)
 
+## Cohort check
+w1p %>% 
+  count(w1p526) %>% 
+  mutate(birthyear = w1p526 + 1911) %>% 
+  filter(birthyear >= 1956, birthyear <= 1965) %>% 
+  mutate(pct = round(n * 100 / nrow(w1p), 2), sum_pct = sum(pct)) %>% 
+  select(birthyear, n, pct, sum_pct)
 ```
 
 ```{r Background}
@@ -365,12 +372,12 @@ schscore <- schscore %>% filter(priv == 0) %>%
   group_by(geoarea) %>% 
   mutate(rank_bygeo = rank(-meanscore)) %>%   # rank school by sector
   mutate(star = case_when(
-    geoarea == 1 & rank_bygeo <= round(97*0.1935) ~ 1,
-    geoarea == 2 & rank_bygeo <= round(30*0.1935) ~ 1,
-    geoarea == 3 & rank_bygeo <= round(65*0.1935) ~ 1,
-    geoarea == 4 & rank_bygeo <= round(29*0.1935) ~ 1,
-    geoarea == 5 & rank_bygeo <= round(36*0.1935) ~ 1,
-    geoarea == 6 & rank_bygeo <= round(22*0.1935) ~ 1,
+    geoarea == 1 & rank_bygeo <= round(97*0.2) ~ 1,
+    geoarea == 2 & rank_bygeo <= round(30*0.2) ~ 1,
+    geoarea == 3 & rank_bygeo <= round(65*0.2) ~ 1,
+    geoarea == 4 & rank_bygeo <= round(29*0.2) ~ 1,
+    geoarea == 5 & rank_bygeo <= round(36*0.2) ~ 1,
+    geoarea == 6 & rank_bygeo <= round(22*0.2) ~ 1,
     .default = 0)) %>%
   ungroup() %>% 
   right_join(schscore)

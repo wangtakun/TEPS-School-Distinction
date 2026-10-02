@@ -431,6 +431,29 @@ Seq2SES <- feglm(
   cluster = ~sch_id
 ) 
 Seq2SES %>% coeftest() %>% coeftest_tidy()
+
+
+## Again, with E0I1 as ref
+teps$pses <- relevel(teps$pses, ref = "E0I1")
+Seq2SES_inc <- feglm(
+  star ~ pses + 
+    male + onlychild + edstchild + ygstchild + cogability + marriage + 
+    pethn + geoarea + pocc + pboss + pmgm,
+  family = "binomial", 
+  data = teps %>% filter(schtype != "ordi"),
+  cluster = ~sch_id,
+)
+Seq2SES_inc %>% coeftest() %>% coeftest_tidy()
+
+
+## Again, with E1I0 as ref
+teps$pses <- relevel(teps$pses, ref = "E1I0")
+Seq2SES_edu <- update(Seq2SES_inc, data = teps %>% filter(schtype != "ordi"))
+Seq2SES_edu %>% coeftest() %>% coeftest_tidy()
+
+
+## Show sample size
+teps %>% filter(schtype != "ordi") %>% nrow()
 ```
 
 \newpage

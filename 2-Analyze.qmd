@@ -433,6 +433,8 @@ Seq2SES <- feglm(
 Seq2SES %>% coeftest() %>% coeftest_tidy()
 ```
 
+\newpage
+
 # Parenting
 
 ```{r Parenting}
@@ -499,6 +501,45 @@ Mech2_cl <- ms_cluster(Mech2, cluster = ~ sch_id)
 
 ## Results (SEs clustered by school)
 modelsummary(list(Mech1_cl, Mech2_cl),
+             shape = term ~ model + response,
+             coef_map = c(
+               "pedu_bi", "income_bi", "peduXincome",
+               "pexpedu", "book", "art", "reloc",
+               "acadcomm", "talentcls", "abstudy", "edusav",
+               "(Intercept)"), 
+             gof_omit = "R2|BIC|RMSE",
+             title = "Parenting and School Type (with Cognitive Ability)",
+             stars = TRUE, 
+             output = "markdown")
+```
+
+```{r Mechanism2}
+
+## Multinom
+teps$schtype <- relevel(teps$schtype, ref = "ordi")
+Mech3 <- teps %>% 
+  multinom(schtype ~ pedu_bi + income_bi + peduXincome + 
+             pexpedu + book + art + reloc + 
+             acadcomm + talentcls + abstudy + edusav + 
+             male + onlychild + edstchild + ygstchild + marriage + 
+             pethn + geoarea + pocc + pboss + pmgm,
+           data = .) 
+Mech3_cl <- ms_cluster(Mech3, cluster = ~ sch_id)
+
+
+## Multinom with a different reference group
+teps$schtype <- relevel(teps$schtype, ref = "priv")
+Mech4 <- teps %>% 
+  multinom(schtype ~ pedu_bi + income_bi + peduXincome + 
+             pexpedu + book + art + reloc + 
+             acadcomm + talentcls + abstudy + edusav + 
+             male + onlychild + edstchild + ygstchild + marriage + 
+             pethn + geoarea + pocc + pboss + pmgm,
+           data = .) 
+Mech4_cl <- ms_cluster(Mech4, cluster = ~ sch_id)
+
+## Results (SEs clustered by school)
+modelsummary(list(Mech3_cl, Mech4_cl),
              shape = term ~ model + response,
              coef_map = c(
                "pedu_bi", "income_bi", "peduXincome",
